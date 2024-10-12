@@ -1,3 +1,9 @@
+# Ignore context file from user
+context.txt
+
+# Ignore configuration file
+config.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
