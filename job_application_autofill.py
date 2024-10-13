@@ -83,32 +83,48 @@ class JobApplicationAutofill:
         self.current_application_context = []
         print("Starting a new application. Previous context cleared.")
 
-    def get_field_prompt(self, current_element):
+    def get_field_info(self, element):
         try:
-            print(f"get_field_prompt current_element: {current_element}")
             wait = WebDriverWait(self.driver, 10)
             label = wait.until(
                 EC.presence_of_element_located((By.XPATH, "./preceding::label[1]"))
             )
-            return label.text
+            label_text = label.text
         except (NoSuchElementException, TimeoutException):
-            try:
-                placeholder = current_element.get_attribute("placeholder")
-                if placeholder:
-                    return placeholder
+            print(
+                "Unable to find label for the current field. Checking for aria-label or placeholder."
+            )
+            label_text = (
+                element.get_attribute("aria-label")
+                or element.get_attribute("placeholder")
+                or "Unknown field"
+            )
 
-                aria_label = current_element.get_attribute("aria-label")
-                return aria_label if aria_label else "Unknown field"
-            except:
-                return "Unknown field"
+        attributes = self.get_element_attributes(element)
+        return label_text, attributes
 
-    def query_ollama(self, prompt, current_element):
+    def get_element_attributes(self, element):
+        attributes = {}
+        for attr in [
+            "id",
+            "name",
+            "type",
+            "placeholder",
+            "class",
+            "maxlength",
+            "aria-label",
+        ]:
+            value = element.get_attribute(attr)
+            if value:
+                attributes[attr] = value
+        return attributes
+
+    def query_ollama(self, prompt, element):
         url = "http://localhost:11434/api/generate"
         data = {"model": self.ollama_model, "prompt": prompt}
         try:
             with requests.post(url, json=data, stream=True) as response:
                 response.raise_for_status()
-                print(f"query_ollama current_element: {current_element}")
                 full_response = ""
                 for line in response.iter_lines():
                     if line:
@@ -116,53 +132,56 @@ class JobApplicationAutofill:
                         if "response" in json_response:
                             chunk = json_response["response"]
                             full_response += chunk
-                            current_element.send_keys(chunk)
+                            element.send_keys(chunk)
                 return full_response
         except requests.RequestException as e:
             print(f"Error querying Ollama: {e}")
             return "Error querying Ollama"
 
     def fill_current_field(self):
-        current_element = self.driver.switch_to.active_element
-        current_element.clear()
-        field_prompt = self.get_field_prompt(current_element)
-        full_context = (
-            f"Context from file:\n{self.context}\n\n"
-            f"Previous questions and answers:\n"
-            f"{'\n'.join([f'Q: {q}\nA: {a}' for q, a in self.current_application_context])}\n\n"
-            f"New question: {field_prompt}\n"
-            f"Please answer this question as if you were the job applicant. "
-            f"Keep the answer concise and relevant to the question."
-        )
         try:
+            current_element = self.driver.switch_to.active_element
+            label_text, attributes = self.get_field_info(current_element)
+            field_info = f"Field label: {label_text}\nField attributes: {json.dumps(attributes, indent=2)}"
+
+            full_context = (
+                f"Context from file:\n{self.context}\n\n"
+                f"Previous questions and answers:\n"
+                f"{'\n'.join([f'Q: {q}\nA: {a}' for q, a in self.current_application_context])}\n\n"
+                f"New field information:\n{field_info}\n"
+                f"Please provide an appropriate response for this field, considering its label and attributes. "
+                f"Keep the answer concise and relevant to the field type and context."
+            )
+
+            current_element.clear()
             answer = self.query_ollama(full_context, current_element)
 
-            self.current_application_context.append((field_prompt, answer))
-            if field_prompt not in self.answer_history:
-                self.answer_history[field_prompt] = []
-            self.answer_history[field_prompt].append(answer)
+            self.current_application_context.append((label_text, answer))
+            if label_text not in self.answer_history:
+                self.answer_history[label_text] = []
+            self.answer_history[label_text].append(answer)
 
-            print(f"Field '{field_prompt}' filled with: {answer}")
+            print(f"Field '{label_text}' filled with: {answer}")
         except Exception as e:
             print(f"Error filling field: {e}")
 
     def change_answer(self, direction):
         current_element = self.driver.switch_to.active_element
-        field_prompt = self.get_field_prompt(current_element)
-        if field_prompt in self.answer_history:
+        label_text, _ = self.get_field_info(current_element)
+        if label_text in self.answer_history:
             current_value = current_element.get_attribute("value")
             current_index = (
-                self.answer_history[field_prompt].index(current_value)
-                if current_value in self.answer_history[field_prompt]
+                self.answer_history[label_text].index(current_value)
+                if current_value in self.answer_history[label_text]
                 else -1
             )
             if direction == "previous":
                 new_index = max(0, current_index - 1)
             else:  # next
                 new_index = min(
-                    len(self.answer_history[field_prompt]) - 1, current_index + 1
+                    len(self.answer_history[label_text]) - 1, current_index + 1
                 )
-            new_answer = self.answer_history[field_prompt][new_index]
+            new_answer = self.answer_history[label_text][new_index]
             current_element.clear()
             current_element.send_keys(new_answer)
             print(f"Answer changed to: {new_answer}")
