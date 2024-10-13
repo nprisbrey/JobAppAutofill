@@ -18,7 +18,7 @@ class JobApplicationAutofill:
         self.context = ""
         self.current_application_context = []
         self.answer_history = {}
-        self.ollama_model = "mistral"  # Default model
+        self.ollama_model = "llama3.2"  # Default model
         self.config = self.load_config()
 
     def load_config(self):
@@ -104,7 +104,7 @@ class JobApplicationAutofill:
             return None
 
     def extract_input_ids(self, html):
-        pattern = r'<(input|textarea|select)[^>]*id=[\'"]([^\'"]*)[\'"][^>]*>'
+        pattern = r'<(input|textarea|select)[^>]* id=[\'"]([^\'"]*)[\'"][^>]*>'
         return re.findall(pattern, html, re.IGNORECASE)
 
     def query_ollama(self, prompt, element=None):
@@ -225,11 +225,12 @@ class JobApplicationAutofill:
 
     def create_prompt(self, form_html, element_type, element_id, label):
         return (
-            f"Context from file:\n{self.context}\n\n"
+            f"Job applicant information:\n{self.context}\n\n"
             f"Current form HTML:\n{form_html}\n\n"
-            f"Please provide an appropriate response for the {element_type} field with ID '{element_id}' and label '{label}'. "
-            f"Consider the field's type and label, and the current state of the form. "
-            f"Keep the answer concise and relevant to the field type and context."
+            "You are an assistant to the job applicant with the information given above. You are using the information given about the job applicant to fill in a field in the form given above. "
+            f"Respond with exactly what the job aplicant would say in response for the {element_type} field with ID '{element_id}' and label '{label}'. "
+            "Consider the field's type and label, and the current state of the form. Note that your whole and complete response will be filled in as the input field's value, meaning only respond with exactly what the job applicant would say. Keep the answer concise and relevant to the field type and context.\n"
+            f"Response to insert into {element_type} field with ID '{element_id}' and label '{label}': "
         )
 
     def change_answer(self, direction):
