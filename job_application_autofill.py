@@ -1,5 +1,6 @@
 import json
 import requests
+import subprocess
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.chrome.options import Options as ChromeOptions
@@ -7,7 +8,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
-from pynput import keyboard
 
 
 class JobApplicationAutofill:
@@ -19,7 +19,6 @@ class JobApplicationAutofill:
         self.answer_history = {}
         self.ollama_model = "mistral"  # Default model
         self.config = self.load_config()
-        self.keyboard_listener = None
 
     def load_config(self):
         try:
@@ -66,31 +65,6 @@ class JobApplicationAutofill:
             else:
                 print("Invalid choice. Please enter 'firefox' or 'chrome'.")
 
-    def setup_keyboard_shortcuts(self):
-        def on_press(key):
-            try:
-                if key == keyboard.KeyCode.from_char("n") and self.check_modifiers(key):
-                    self.new_application()
-                elif key == keyboard.KeyCode.from_char("f") and self.check_modifiers(
-                    key
-                ):
-                    self.fill_current_field()
-                elif key == keyboard.Key.left and self.check_modifiers(key):
-                    self.previous_answer()
-                elif key == keyboard.Key.right and self.check_modifiers(key):
-                    self.next_answer()
-            except AttributeError:
-                pass
-
-        self.keyboard_listener = keyboard.Listener(on_press=on_press)
-        self.keyboard_listener.start()
-
-    def check_modifiers(self, key):
-        return (
-            keyboard.Key.ctrl in self.keyboard_listener.pressed_keys
-            and keyboard.Key.shift in self.keyboard_listener.pressed_keys
-        )
-
     def load_context_file(self):
         if self.config["context_file"]:
             file_path = self.config["context_file"]
@@ -109,37 +83,49 @@ class JobApplicationAutofill:
         self.current_application_context = []
         print("Starting a new application. Previous context cleared.")
 
-    def get_field_prompt(self):
+    def get_field_prompt(self, current_element):
         try:
-            current_element = self.driver.switch_to.active_element
+            print(f"get_field_prompt current_element: {current_element}")
             wait = WebDriverWait(self.driver, 10)
             label = wait.until(
                 EC.presence_of_element_located((By.XPATH, "./preceding::label[1]"))
             )
             return label.text
         except (NoSuchElementException, TimeoutException):
-            print(
-                "Unable to find label for the current field. Using placeholder text if available."
-            )
             try:
                 placeholder = current_element.get_attribute("placeholder")
-                return placeholder if placeholder else "Unknown field"
+                if placeholder:
+                    return placeholder
+
+                aria_label = current_element.get_attribute("aria-label")
+                return aria_label if aria_label else "Unknown field"
             except:
                 return "Unknown field"
 
-    def query_ollama(self, prompt):
+    def query_ollama(self, prompt, current_element):
         url = "http://localhost:11434/api/generate"
         data = {"model": self.ollama_model, "prompt": prompt}
         try:
-            response = requests.post(url, json=data, timeout=30)
-            response.raise_for_status()
-            return response.json()["response"]
+            with requests.post(url, json=data, stream=True) as response:
+                response.raise_for_status()
+                print(f"query_ollama current_element: {current_element}")
+                full_response = ""
+                for line in response.iter_lines():
+                    if line:
+                        json_response = json.loads(line)
+                        if "response" in json_response:
+                            chunk = json_response["response"]
+                            full_response += chunk
+                            current_element.send_keys(chunk)
+                return full_response
         except requests.RequestException as e:
             print(f"Error querying Ollama: {e}")
             return "Error querying Ollama"
 
     def fill_current_field(self):
-        field_prompt = self.get_field_prompt()
+        current_element = self.driver.switch_to.active_element
+        current_element.clear()
+        field_prompt = self.get_field_prompt(current_element)
         full_context = (
             f"Context from file:\n{self.context}\n\n"
             f"Previous questions and answers:\n"
@@ -148,24 +134,21 @@ class JobApplicationAutofill:
             f"Please answer this question as if you were the job applicant. "
             f"Keep the answer concise and relevant to the question."
         )
-        answer = self.query_ollama(full_context)
-
-        self.current_application_context.append((field_prompt, answer))
-        if field_prompt not in self.answer_history:
-            self.answer_history[field_prompt] = []
-        self.answer_history[field_prompt].append(answer)
-
         try:
-            current_element = self.driver.switch_to.active_element
-            current_element.clear()
-            current_element.send_keys(answer)
+            answer = self.query_ollama(full_context, current_element)
+
+            self.current_application_context.append((field_prompt, answer))
+            if field_prompt not in self.answer_history:
+                self.answer_history[field_prompt] = []
+            self.answer_history[field_prompt].append(answer)
+
             print(f"Field '{field_prompt}' filled with: {answer}")
         except Exception as e:
             print(f"Error filling field: {e}")
 
     def change_answer(self, direction):
         current_element = self.driver.switch_to.active_element
-        field_prompt = self.get_field_prompt()
+        field_prompt = self.get_field_prompt(current_element)
         if field_prompt in self.answer_history:
             current_value = current_element.get_attribute("value")
             current_index = (
@@ -195,35 +178,71 @@ class JobApplicationAutofill:
     def set_ollama_model(self):
         print()  # Add a new line for better readability
         new_model = input(
-            f"Current Ollama model: {self.ollama_model}. Enter a new model name or press Enter to keep current: "
+            f"Current Ollama model: {self.ollama_model}.\nEnter a new model name or press Enter to keep current: "
         )
         if new_model:
             self.ollama_model = new_model
-            print(f"Ollama model set to: {self.ollama_model}")
+            print(f"Setting Ollama model to: {self.ollama_model}")
             self.save_config()
+
+        # Pull the Ollama model
+        print(f"Pulling Ollama model: {self.ollama_model}")
+        try:
+            subprocess.run(["ollama", "pull", self.ollama_model], check=True)
+            print(f"Successfully pulled Ollama model: {self.ollama_model}")
+        except subprocess.CalledProcessError as e:
+            print(f"Error pulling Ollama model: {e}")
+            print("Reverting to previous model.")
+            self.ollama_model = self.config["ollama_model"]
+        except FileNotFoundError:
+            print(
+                "Error: 'ollama' command not found. Please ensure Ollama is installed and in your system PATH."
+            )
+            print("Reverting to previous model.")
+            self.ollama_model = self.config["ollama_model"]
+        except Exception as e:
+            print(f"Uncaught error while pulling model with Ollama: {e}")
+
+    def print_commands(self):
+        print("\nAvailable commands:")
+        print("n: Start a new application")
+        print("f: Fill the current field")
+        print("p: Use previous answer")
+        print("x: Use next answer")
+        print("q: Quit the program")
+        print("h: Show this help message")
 
     def run(self):
         self.load_context_file()
         self.set_ollama_model()
         self.setup_browser()
-        self.setup_keyboard_shortcuts()
         print(f"Using {self.config['browser'].capitalize()} browser.")
-        print("Program is running. Use the following shortcuts:")
-        print("Ctrl+Shift+N: Start a new application")
-        print("Ctrl+Shift+F: Fill the current field")
-        print("Ctrl+Shift+Left Arrow: Use previous answer")
-        print("Ctrl+Shift+Right Arrow: Use next answer")
-        print("Press Ctrl+C to exit the program")
-        try:
-            # Keep the program running
-            keyboard.Listener.join(self.keyboard_listener)
-        except KeyboardInterrupt:
-            print("Exiting program...")
-        finally:
-            if self.driver:
-                self.driver.quit()
-            if self.keyboard_listener:
-                self.keyboard_listener.stop()
+        self.print_commands()
+
+        while True:
+            try:
+                command = input("\nEnter a command: ").lower()
+                if command == "n":
+                    self.new_application()
+                elif command == "f":
+                    self.fill_current_field()
+                elif command == "p":
+                    self.previous_answer()
+                elif command == "x":
+                    self.next_answer()
+                elif command == "h":
+                    self.print_commands()
+                elif command == "q":
+                    print("Exiting program...")
+                    break
+                else:
+                    print("Unknown command. Type 'h' for help.")
+            except KeyboardInterrupt:
+                print("\nExiting program...")
+                break
+
+        if self.driver:
+            self.driver.quit()
 
 
 if __name__ == "__main__":
