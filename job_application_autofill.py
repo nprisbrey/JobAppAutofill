@@ -1,6 +1,7 @@
 import json
 import requests
 import subprocess
+import re
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.chrome.options import Options as ChromeOptions
@@ -83,43 +84,30 @@ class JobApplicationAutofill:
         self.current_application_context = []
         print("Starting a new application. Previous context cleared.")
 
-    def get_field_info(self, element):
+    def switch_to_latest_tab(self):
+        if self.driver.window_handles:
+            self.driver.switch_to.window(self.driver.window_handles[-1])
+
+    def get_form_html(self):
         try:
-            wait = WebDriverWait(self.driver, 10)
-            label = wait.until(
-                EC.presence_of_element_located((By.XPATH, "./preceding::label[1]"))
+            self.switch_to_latest_tab()
+            current_element = self.driver.switch_to.active_element
+            form = current_element.find_element(By.XPATH, "ancestor::form")
+            return form.get_attribute("outerHTML")
+        except NoSuchElementException:
+            print("No form found containing the current element. Using body instead.")
+            return self.driver.find_element(By.TAG_NAME, "body").get_attribute(
+                "outerHTML"
             )
-            label_text = label.text
-        except (NoSuchElementException, TimeoutException):
-            print(
-                "Unable to find label for the current field. Checking for aria-label or placeholder."
-            )
-            label_text = (
-                element.get_attribute("aria-label")
-                or element.get_attribute("placeholder")
-                or "Unknown field"
-            )
+        except Exception as e:
+            print(f"Error getting form HTML: {e}")
+            return None
 
-        attributes = self.get_element_attributes(element)
-        return label_text, attributes
+    def extract_input_ids(self, html):
+        pattern = r'<(input|textarea|select)[^>]*id=[\'"]([^\'"]*)[\'"][^>]*>'
+        return re.findall(pattern, html, re.IGNORECASE)
 
-    def get_element_attributes(self, element):
-        attributes = {}
-        for attr in [
-            "id",
-            "name",
-            "type",
-            "placeholder",
-            "class",
-            "maxlength",
-            "aria-label",
-        ]:
-            value = element.get_attribute(attr)
-            if value:
-                attributes[attr] = value
-        return attributes
-
-    def query_ollama(self, prompt, element):
+    def query_ollama(self, prompt, element=None):
         url = "http://localhost:11434/api/generate"
         data = {"model": self.ollama_model, "prompt": prompt}
         try:
@@ -132,56 +120,152 @@ class JobApplicationAutofill:
                         if "response" in json_response:
                             chunk = json_response["response"]
                             full_response += chunk
-                            element.send_keys(chunk)
+                            if element:
+                                element.send_keys(chunk)
                 return full_response
         except requests.RequestException as e:
             print(f"Error querying Ollama: {e}")
             return "Error querying Ollama"
 
-    def fill_current_field(self):
+    def fill_all_fields(self):
+        self.switch_to_latest_tab()
+        form_html = self.get_form_html()
+        if not form_html:
+            return
+
+        input_elements = self.extract_input_ids(form_html)
+
+        for element_type, element_id in input_elements:
+            if not element_id:
+                continue
+
+            try:
+                selenium_element = self.driver.find_element(By.ID, element_id)
+
+                # Check if the element is visible and enabled
+                if (
+                    not selenium_element.is_displayed()
+                    or not selenium_element.is_enabled()
+                ):
+                    print(f"Skipping hidden or disabled element with ID: {element_id}")
+                    continue
+
+                label = self.get_field_label(selenium_element)
+
+                prompt = self.create_prompt(form_html, element_type, element_id, label)
+                response = self.query_ollama(prompt)
+
+                selenium_element.clear()
+                selenium_element.send_keys(response)
+
+                # Store the response in answer_history
+                if label not in self.answer_history:
+                    self.answer_history[label] = []
+                self.answer_history[label].append(response)
+
+                print(f"Field '{label}' filled with: {response}")
+            except Exception as e:
+                print(f"Error processing element with ID {element_id}: {e}")
+
+    def get_field_label(self, element):
+        label_text = None
+
+        # Method 1: Check for 'id' attribute and corresponding label
+        element_id = element.get_attribute("id")
+        if element_id:
+            try:
+                label = self.driver.find_element(
+                    By.CSS_SELECTOR, f"label[for='{element_id}']"
+                )
+                label_text = label.text.strip()
+                if label_text:
+                    return label_text
+            except NoSuchElementException:
+                pass
+
+        # Method 2: Check for a label that's a parent of the input
         try:
-            current_element = self.driver.switch_to.active_element
-            label_text, attributes = self.get_field_info(current_element)
-            field_info = f"Field label: {label_text}\nField attributes: {json.dumps(attributes, indent=2)}"
+            label = element.find_element(By.XPATH, "ancestor::label")
+            label_text = label.text.strip()
+            if label_text:
+                return label_text
+        except NoSuchElementException:
+            pass
 
-            full_context = (
-                f"Context from file:\n{self.context}\n\n"
-                f"Previous questions and answers:\n"
-                f"{'\n'.join([f'Q: {q}\nA: {a}' for q, a in self.current_application_context])}\n\n"
-                f"New field information:\n{field_info}\n"
-                f"Please provide an appropriate response for this field, considering its label and attributes. "
-                f"Keep the answer concise and relevant to the field type and context."
+        # Method 3: Look for the closest preceding label
+        try:
+            label = element.find_element(By.XPATH, "preceding::label[1]")
+            label_text = label.text.strip()
+            if label_text:
+                return label_text
+        except NoSuchElementException:
+            pass
+
+        # Method 4: Look for a label or div with class containing 'label' right before the input
+        try:
+            label = element.find_element(
+                By.XPATH,
+                "./preceding-sibling::*[self::label or contains(@class, 'label')][1]",
             )
+            label_text = label.text.strip()
+            if label_text:
+                return label_text
+        except NoSuchElementException:
+            pass
 
-            current_element.clear()
-            answer = self.query_ollama(full_context, current_element)
+        # Fallback methods
+        label_text = (
+            element.get_attribute("aria-label")
+            or element.get_attribute("placeholder")
+            or element.get_attribute("name")
+            or "Unknown field"
+        )
 
-            self.current_application_context.append((label_text, answer))
-            if label_text not in self.answer_history:
-                self.answer_history[label_text] = []
-            self.answer_history[label_text].append(answer)
+        return label_text
 
-            print(f"Field '{label_text}' filled with: {answer}")
-        except Exception as e:
-            print(f"Error filling field: {e}")
+    def create_prompt(self, form_html, element_type, element_id, label):
+        return (
+            f"Context from file:\n{self.context}\n\n"
+            f"Current form HTML:\n{form_html}\n\n"
+            f"Please provide an appropriate response for the {element_type} field with ID '{element_id}' and label '{label}'. "
+            f"Consider the field's type and label, and the current state of the form. "
+            f"Keep the answer concise and relevant to the field type and context."
+        )
 
     def change_answer(self, direction):
+        self.switch_to_latest_tab()
         current_element = self.driver.switch_to.active_element
-        label_text, _ = self.get_field_info(current_element)
-        if label_text in self.answer_history:
+        if not current_element.is_displayed() or not current_element.is_enabled():
+            print("Current element is not visible or enabled. Cannot change answer.")
+            return
+
+        label = self.get_field_label(current_element)
+        if label in self.answer_history:
             current_value = current_element.get_attribute("value")
             current_index = (
-                self.answer_history[label_text].index(current_value)
-                if current_value in self.answer_history[label_text]
+                self.answer_history[label].index(current_value)
+                if current_value in self.answer_history[label]
                 else -1
             )
+
             if direction == "previous":
                 new_index = max(0, current_index - 1)
+                new_answer = self.answer_history[label][new_index]
             else:  # next
-                new_index = min(
-                    len(self.answer_history[label_text]) - 1, current_index + 1
-                )
-            new_answer = self.answer_history[label_text][new_index]
+                if current_index < len(self.answer_history[label]) - 1:
+                    new_index = current_index + 1
+                    new_answer = self.answer_history[label][new_index]
+                else:
+                    # Generate a new answer
+                    form_html = self.get_form_html()
+                    element_id = current_element.get_attribute("id")
+                    element_type = current_element.tag_name
+                    prompt = self.create_prompt(
+                        form_html, element_type, element_id, label
+                    )
+                    new_answer = self.query_ollama(prompt)
+                    self.answer_history[label].append(new_answer)
+
             current_element.clear()
             current_element.send_keys(new_answer)
             print(f"Answer changed to: {new_answer}")
@@ -225,9 +309,9 @@ class JobApplicationAutofill:
     def print_commands(self):
         print("\nAvailable commands:")
         print("n: Start a new application")
-        print("f: Fill the current field")
-        print("p: Use previous answer")
-        print("x: Use next answer")
+        print("f: Fill all visible fields in the current form")
+        print("p: Use previous answer for the current visible field")
+        print("x: Use next answer or generate a new one for the current visible field")
         print("q: Quit the program")
         print("h: Show this help message")
 
@@ -244,7 +328,7 @@ class JobApplicationAutofill:
                 if command == "n":
                     self.new_application()
                 elif command == "f":
-                    self.fill_current_field()
+                    self.fill_all_fields()
                 elif command == "p":
                     self.previous_answer()
                 elif command == "x":
