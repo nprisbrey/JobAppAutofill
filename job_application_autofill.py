@@ -6,7 +6,7 @@ from selenium import webdriver
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
 
@@ -103,8 +103,8 @@ class JobApplicationAutofill:
             print(f"Error getting form HTML: {e}")
             return None
 
-    def extract_input_ids(self, html):
-        pattern = r'<(input|textarea|select)[^>]* id=[\'"]([^\'"]*)[\'"][^>]*>'
+    def extract_input_elements(self, html):
+        pattern = r"<(?:input|textarea|select)[^>]*>"
         return re.findall(pattern, html, re.IGNORECASE)
 
     def query_ollama(self, prompt, element=None):
@@ -133,39 +133,170 @@ class JobApplicationAutofill:
         if not form_html:
             return
 
-        input_elements = self.extract_input_ids(form_html)
+        input_elements = self.extract_input_elements(form_html)
 
-        for element_type, element_id in input_elements:
-            if not element_id:
+        for element_html in input_elements:
+            element_type = re.search(r"<(\w+)", element_html).group(1)
+            element_id = re.search(r'id=[\'"]([^\'"]*)[\'"]', element_html)
+            element_id = element_id.group(1) if element_id else None
+            element_name = re.search(r'name=[\'"]([^\'"]*)[\'"]', element_html)
+            element_name = element_name.group(1) if element_name else None
+
+            if not element_id and not element_name:
                 continue
 
             try:
-                selenium_element = self.driver.find_element(By.ID, element_id)
-
-                # Check if the element is visible and enabled
-                if (
-                    not selenium_element.is_displayed()
-                    or not selenium_element.is_enabled()
+                if element_type == "input" and re.search(
+                    r'type=[\'"]radio[\'"]', element_html
                 ):
-                    print(f"Skipping hidden or disabled element with ID: {element_id}")
-                    continue
+                    self.handle_radio_group(element_name)
+                else:
+                    if element_id:
+                        selenium_element = self.driver.find_element(By.ID, element_id)
+                    elif element_name:
+                        selenium_element = self.driver.find_element(
+                            By.NAME, element_name
+                        )
 
-                label = self.get_field_label(selenium_element)
+                    # Check if the element is visible and enabled
+                    if (
+                        not selenium_element.is_displayed()
+                        or not selenium_element.is_enabled()
+                    ):
+                        print(
+                            f"Skipping hidden or disabled element: {element_id or element_name}"
+                        )
+                        continue
 
-                prompt = self.create_prompt(form_html, element_type, element_id, label)
-                response = self.query_ollama(prompt)
+                    # Skip file inputs
+                    if selenium_element.get_attribute("type") == "file":
+                        print(
+                            f"Skipping file upload field: {element_id or element_name}"
+                        )
+                        continue
 
-                selenium_element.clear()
-                selenium_element.send_keys(response)
+                    label = self.get_field_label(selenium_element)
+                    print(f"Now processing input with label '{label}'....")
 
-                # Store the response in answer_history
-                if label not in self.answer_history:
-                    self.answer_history[label] = []
-                self.answer_history[label].append(response)
+                    prompt = self.create_prompt(
+                        form_html, element_type, element_id or element_name, label
+                    )
+                    response = self.query_ollama(prompt)
 
-                print(f"Field '{label}' filled with: {response}")
+                    self.fill_field(selenium_element, response, label)
+
             except Exception as e:
-                print(f"Error processing element with ID {element_id}: {e}")
+                print(f"Error processing element {element_id or element_name}: {e}")
+
+    def handle_radio_group(self, name):
+        if not name:
+            return
+
+        radio_group = self.driver.find_elements(By.NAME, name)
+        if not radio_group:
+            print(f"No radio buttons found for group: {name}")
+            return
+
+        # Get the label for the radio group
+        group_label = self.get_field_label(radio_group[0])
+        print(f"Now processing input with label '{group_label}'....")
+
+        # Create prompt and get response
+        prompt = self.create_prompt(self.get_form_html(), "radio", name, group_label)
+        response = self.query_ollama(prompt)
+
+        # Find the best matching radio button
+        best_match = None
+        best_match_score = float("inf")
+        for radio in radio_group:
+            radio_value = radio.get_attribute("value").lower()
+            radio_label = self.get_field_label(radio).lower()
+
+            score = min(
+                self.levenshtein_distance(radio_value, response.lower()),
+                self.levenshtein_distance(radio_label, response.lower()),
+            )
+
+            if score < best_match_score:
+                best_match = radio
+                best_match_score = score
+
+        if best_match:
+            best_match.click()
+            print(
+                f"Radio group '{group_label}' filled with: {best_match.get_attribute('value')}"
+            )
+        else:
+            print(
+                f"No suitable match found for radio group '{group_label}': {response}"
+            )
+
+    def fill_field(self, element, response, label):
+        element_type = element.get_attribute("type")
+
+        if element.tag_name == "select":
+            self.handle_select(element, response, label)
+        elif element_type == "checkbox":
+            self.handle_checkbox(element, response, label)
+        else:  # text, textarea, etc.
+            self.handle_text_input(element, response, label)
+
+    def handle_select(self, element, response, label):
+        select = Select(element)
+        options = [option.text.strip().lower() for option in select.options]
+        response_lower = response.strip().lower()
+
+        best_match = min(
+            options, key=lambda x: self.levenshtein_distance(x, response_lower)
+        )
+        select.select_by_visible_text(best_match)
+        print(f"Field '{label}' (select) filled with: {best_match}")
+
+    def handle_radio(self, element, response, label):
+        radio_group = self.driver.find_elements(By.NAME, element.get_attribute("name"))
+        response_lower = response.strip().lower()
+
+        for radio in radio_group:
+            if radio.get_attribute("value").lower() == response_lower:
+                radio.click()
+                print(f"Field '{label}' (radio) filled with: {response}")
+                return
+
+        print(f"No matching radio button found for '{label}': {response}")
+
+    def handle_checkbox(self, element, response, label):
+        response_lower = response.strip().lower()
+        if response_lower in ["yes", "true", "1", "on"]:
+            if not element.is_selected():
+                element.click()
+            print(f"Field '{label}' (checkbox) checked")
+        elif response_lower in ["no", "false", "0", "off"]:
+            if element.is_selected():
+                element.click()
+            print(f"Field '{label}' (checkbox) unchecked")
+        else:
+            print(f"Invalid response for checkbox '{label}': {response}")
+
+    def handle_text_input(self, element, response, label):
+        element.clear()
+        element.send_keys(response)
+        print(f"Field '{label}' filled with: {response}")
+
+    def levenshtein_distance(self, s1, s2):
+        if len(s1) < len(s2):
+            return self.levenshtein_distance(s2, s1)
+        if len(s2) == 0:
+            return len(s1)
+        previous_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+        return previous_row[-1]
 
     def get_field_label(self, element):
         label_text = None
@@ -241,6 +372,7 @@ class JobApplicationAutofill:
             return
 
         label = self.get_field_label(current_element)
+        print(f"Now processing input with label '{label}'....")
         if label in self.answer_history:
             current_value = current_element.get_attribute("value")
             current_index = (
