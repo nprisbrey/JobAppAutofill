@@ -182,6 +182,7 @@ class JobApplicationAutofill:
                         form_html, element_type, element_id or element_name, label
                     )
                     response = self.query_ollama(prompt)
+                    self.answer_history[label] = [response]
 
                     self.fill_field(selenium_element, response, label)
 
