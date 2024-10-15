@@ -375,7 +375,7 @@ class JobApplicationAutofill:
             f"Job applicant information:\n{self.context}\n\n"
             f"Current form HTML:\n{form_html}\n\n"
             "You are an assistant to the job applicant with the information given above. You are using the information given about the job applicant to fill in a field in the form given above. "
-            f"Respond with exactly what the job aplicant would say in response for the {element_type} field with ID '{element_id}' and label '{label}'. "
+            f"Respond with exactly what the job applicant would say in response for the {element_type} field with ID '{element_id}' and label '{label}'. "
             "Consider the field's type and label, and the current state of the form. Note that your whole and complete response will be filled in as the input field's value, meaning only respond with exactly what the job applicant would say. Keep the answer concise and relevant to the field type and context.\n"
             f"Response to insert into {element_type} field with ID '{element_id}' and label '{label}': "
         )
