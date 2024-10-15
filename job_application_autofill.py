@@ -95,6 +95,21 @@ class JobApplicationAutofill:
             form = current_element.find_element(By.XPATH, "ancestor::form")
             return form.get_attribute("outerHTML")
         except NoSuchElementException:
+            try:
+                # Try checking if there's an iframe with a form instead
+                iframe = self.driver.find_element(By.CSS_SELECTOR, "#modal > iframe")
+                # Switch to iframe
+                self.driver.switch_to.frame(iframe)
+
+                current_element = self.driver.switch_to.active_element
+                form = current_element.find_element(By.XPATH, "ancestor::form")
+                return form.get_attribute("outerHTML")
+            except NoSuchElementException:
+                pass
+            except Exception as e:
+                print(f"Error getting form HTML in iframe: {e}")
+                return None
+
             print("No form found containing the current element. Using body instead.")
             return self.driver.find_element(By.TAG_NAME, "body").get_attribute(
                 "outerHTML"
