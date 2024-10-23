@@ -1,6 +1,6 @@
 accelerate==1.0.1
 black==24.10.0
-requests==2.32.3
+ollama==0.3.3
 selenium==4.25.0
 torch==2.5.0
 transformers==4.45.2

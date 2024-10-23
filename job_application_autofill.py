@@ -1,5 +1,4 @@
 import json
-import requests
 import subprocess
 import re
 from selenium import webdriver
@@ -132,10 +131,6 @@ class JobApplicationAutofill:
         return re.findall(pattern, html, re.IGNORECASE)
 
     def query_model(self, prompt, element=None):
-        if element:
-            return self.model_interface.stream_generate(
-                prompt, lambda x: element.send_keys(x)
-            )
         return self.model_interface.generate(prompt)
 
     def fill_all_fields(self):
@@ -435,7 +430,7 @@ class JobApplicationAutofill:
                     "Enter new model path or press Enter to keep current: "
                 )
                 if new_model:
-                    self.config["model_name"] = new_model
+                    self.config["hf_model_name"] = new_model
                 break
             else:
                 print("Invalid choice. Please enter 1 or 2.")
@@ -455,20 +450,14 @@ class JobApplicationAutofill:
     def _pull_ollama_model(self):
         print(f"Pulling Ollama model: {self.config['ollama_model_name']}")
         try:
-            subprocess.run(
-                ["ollama", "pull", self.config["ollama_model_name"]], check=True
-            )
+            ollama.pull(self.config["ollama_model_name"])
             print(
                 f"Successfully pulled Ollama model: {self.config['ollama_model_name']}"
             )
-        except subprocess.CalledProcessError as e:
-            print(f"Error pulling Ollama model: {e}")
-        except FileNotFoundError:
-            print(
-                "Error: 'ollama' command not found. Please ensure Ollama is installed and in your system PATH.."
-            )
+        except ollama.ResponseError as e:
+            print(f"Error pulling Ollama model: {e.error}")
         except Exception as e:
-            print(f"Uncaught error while pulling model: {e}")
+            print(f"Unexpected error while pulling model: {e}")
 
     def print_commands(self):
         print("\nAvailable commands:")
