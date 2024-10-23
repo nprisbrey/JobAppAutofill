@@ -9,6 +9,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from model_interface import get_model_interface
 
 
 class JobApplicationAutofill:
@@ -18,7 +19,7 @@ class JobApplicationAutofill:
         self.context = ""
         self.current_application_context = []
         self.answer_history = {}
-        self.ollama_model = "llama3.2"  # Default model
+        self.model_interface = None
         self.config = self.load_config()
 
     def load_config(self):
@@ -26,14 +27,22 @@ class JobApplicationAutofill:
             with open("config.json", "r") as f:
                 return json.load(f)
         except FileNotFoundError:
-            return {"context_file": "", "ollama_model": "mistral", "browser": ""}
+            return {
+                "context_file": "",
+                "model_type": "ollama",
+                "ollama_model_name": "llama3.2",
+                "hf_model_name": "meta-llama/Llama-3.2-3B-Instruct",
+                "browser": "",
+            }
 
     def save_config(self):
         with open("config.json", "w") as f:
             json.dump(
                 {
                     "context_file": self.context_file,
-                    "ollama_model": self.ollama_model,
+                    "model_type": self.config["model_type"],
+                    "ollama_model_name": self.config["ollama_model_name"],
+                    "hf_model_name": self.config["hf_model_name"],
                     "browser": self.config.get("browser", ""),
                 },
                 f,
@@ -122,25 +131,12 @@ class JobApplicationAutofill:
         pattern = r"<(?:input|textarea|select)[^>]*>"
         return re.findall(pattern, html, re.IGNORECASE)
 
-    def query_ollama(self, prompt, element=None):
-        url = "http://localhost:11434/api/generate"
-        data = {"model": self.ollama_model, "prompt": prompt}
-        try:
-            with requests.post(url, json=data, stream=True) as response:
-                response.raise_for_status()
-                full_response = ""
-                for line in response.iter_lines():
-                    if line:
-                        json_response = json.loads(line)
-                        if "response" in json_response:
-                            chunk = json_response["response"]
-                            full_response += chunk
-                            if element:
-                                element.send_keys(chunk)
-                return full_response
-        except requests.RequestException as e:
-            print(f"Error querying Ollama: {e}")
-            return "Error querying Ollama"
+    def query_model(self, prompt, element=None):
+        if element:
+            return self.model_interface.stream_generate(
+                prompt, lambda x: element.send_keys(x)
+            )
+        return self.model_interface.generate(prompt)
 
     def fill_all_fields(self):
         self.switch_to_latest_tab()
@@ -152,9 +148,9 @@ class JobApplicationAutofill:
 
         for element_html in input_elements:
             element_type = re.search(r"<(\w+)", element_html).group(1)
-            element_id = re.search(r'id=[\'"]([^\'"]*)[\'"]', element_html)
+            element_id = re.search(r' id=[\'"]([^\'"]*)[\'"]', element_html)
             element_id = element_id.group(1) if element_id else None
-            element_name = re.search(r'name=[\'"]([^\'"]*)[\'"]', element_html)
+            element_name = re.search(r' name=[\'"]([^\'"]*)[\'"]', element_html)
             element_name = element_name.group(1) if element_name else None
 
             if not element_id and not element_name:
@@ -162,7 +158,7 @@ class JobApplicationAutofill:
 
             try:
                 if element_type == "input" and re.search(
-                    r'type=[\'"]radio[\'"]', element_html
+                    r' type=[\'"]radio[\'"]', element_html
                 ):
                     self.handle_radio_group(element_name)
                 else:
@@ -196,7 +192,7 @@ class JobApplicationAutofill:
                     prompt = self.create_prompt(
                         form_html, element_type, element_id or element_name, label
                     )
-                    response = self.query_ollama(prompt)
+                    response = self.query_model(prompt)
                     self.answer_history[label] = [response]
 
                     self.fill_field(selenium_element, response, label)
@@ -219,7 +215,7 @@ class JobApplicationAutofill:
 
         # Create prompt and get response
         prompt = self.create_prompt(self.get_form_html(), "radio", name, group_label)
-        response = self.query_ollama(prompt)
+        response = self.query_model(prompt)
 
         # Find the best matching radio button
         best_match = None
@@ -267,18 +263,6 @@ class JobApplicationAutofill:
         )
         select.select_by_visible_text(best_match)
         print(f"Field '{label}' (select) filled with: {best_match}")
-
-    def handle_radio(self, element, response, label):
-        radio_group = self.driver.find_elements(By.NAME, element.get_attribute("name"))
-        response_lower = response.strip().lower()
-
-        for radio in radio_group:
-            if radio.get_attribute("value").lower() == response_lower:
-                radio.click()
-                print(f"Field '{label}' (radio) filled with: {response}")
-                return
-
-        print(f"No matching radio button found for '{label}': {response}")
 
     def handle_checkbox(self, element, response, label):
         response_lower = response.strip().lower()
@@ -412,7 +396,7 @@ class JobApplicationAutofill:
                     prompt = self.create_prompt(
                         form_html, element_type, element_id, label
                     )
-                    new_answer = self.query_ollama(prompt)
+                    new_answer = self.query_model(prompt)
                     self.answer_history[label].append(new_answer)
 
             current_element.clear()
@@ -427,33 +411,64 @@ class JobApplicationAutofill:
     def next_answer(self):
         self.change_answer("next")
 
-    def set_ollama_model(self):
-        print()  # Add a new line for better readability
-        new_model = input(
-            f"Current Ollama model: {self.ollama_model}.\nEnter a new model name or press Enter to keep current: "
-        )
-        if new_model:
-            self.ollama_model = new_model
-            print(f"Setting Ollama model to: {self.ollama_model}")
-            self.save_config()
+    def set_model(self):
+        print("\nChoose model type:")
+        print("1. Ollama")
+        print("2. HuggingFace")
 
-        # Pull the Ollama model
-        print(f"Pulling Ollama model: {self.ollama_model}")
+        while True:
+            choice = input("Enter choice (1/2): ")
+            if choice == "1":
+                self.config["model_type"] = "ollama"
+                new_model = input(
+                    f"Current Ollama model: {self.config.get('ollama_model_name', 'llama3.2')}.\n"
+                    "Enter a new model name or press Enter to keep current: "
+                )
+                if new_model:
+                    self.config["ollama_model_name"] = new_model
+                self._pull_ollama_model()
+                break
+            elif choice == "2":
+                self.config["model_type"] = "huggingface"
+                new_model = input(
+                    f"Current HuggingFace model: {self.config.get('hf_model_name', 'meta-llama/Llama-3.2-3B-Instruct')}.\n"
+                    "Enter new model path or press Enter to keep current: "
+                )
+                if new_model:
+                    self.config["model_name"] = new_model
+                break
+            else:
+                print("Invalid choice. Please enter 1 or 2.")
+
+        match self.config["model_type"]:
+            case "ollama":
+                self.model_interface = get_model_interface(
+                    "ollama", self.config["ollama_model_name"]
+                )
+            case "huggingface":
+                self.model_interface = get_model_interface(
+                    "huggingface", self.config["hf_model_name"]
+                )
+
+        self.save_config()
+
+    def _pull_ollama_model(self):
+        print(f"Pulling Ollama model: {self.config['ollama_model_name']}")
         try:
-            subprocess.run(["ollama", "pull", self.ollama_model], check=True)
-            print(f"Successfully pulled Ollama model: {self.ollama_model}")
+            subprocess.run(
+                ["ollama", "pull", self.config["ollama_model_name"]], check=True
+            )
+            print(
+                f"Successfully pulled Ollama model: {self.config['ollama_model_name']}"
+            )
         except subprocess.CalledProcessError as e:
             print(f"Error pulling Ollama model: {e}")
-            print("Reverting to previous model.")
-            self.ollama_model = self.config["ollama_model"]
         except FileNotFoundError:
             print(
-                "Error: 'ollama' command not found. Please ensure Ollama is installed and in your system PATH."
+                "Error: 'ollama' command not found. Please ensure Ollama is installed and in your system PATH.."
             )
-            print("Reverting to previous model.")
-            self.ollama_model = self.config["ollama_model"]
         except Exception as e:
-            print(f"Uncaught error while pulling model with Ollama: {e}")
+            print(f"Uncaught error while pulling model: {e}")
 
     def print_commands(self):
         print("\nAvailable commands:")
@@ -461,12 +476,13 @@ class JobApplicationAutofill:
         print("f: Fill all visible fields in the current form")
         print("p: Use previous answer for the current visible field")
         print("x: Use next answer or generate a new one for the current visible field")
+        print("m: Change model settings")
         print("q: Quit the program")
         print("h: Show this help message")
 
     def run(self):
         self.load_context_file()
-        self.set_ollama_model()
+        self.set_model()
         self.setup_browser()
         print(f"Using {self.config['browser'].capitalize()} browser.")
         self.print_commands()
@@ -482,6 +498,8 @@ class JobApplicationAutofill:
                     self.previous_answer()
                 elif command == "x":
                     self.next_answer()
+                elif command == "m":
+                    self.set_model()
                 elif command == "h":
                     self.print_commands()
                 elif command == "q":
