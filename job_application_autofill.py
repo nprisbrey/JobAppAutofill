@@ -24,15 +24,20 @@ class JobApplicationAutofill:
     def load_config(self):
         try:
             with open("config.json", "r") as f:
-                return json.load(f)
+                config = json.load(f)
         except FileNotFoundError:
-            return {
+            config = {
                 "context_file": "",
                 "model_type": "ollama",
                 "ollama_model_name": "llama3.2",
                 "hf_model_name": "meta-llama/Llama-3.2-3B-Instruct",
                 "browser": "",
+                "generation_method": "greedy",  # Add default generation method
+                "beam_size": 5,  # Add default beam size
+                "top_k": 50,  # Add default top-k value
+                "top_p": 0.9,  # Add default top-p value
             }
+        return config
 
     def save_config(self):
         with open("config.json", "w") as f:
@@ -43,6 +48,10 @@ class JobApplicationAutofill:
                     "ollama_model_name": self.config["ollama_model_name"],
                     "hf_model_name": self.config["hf_model_name"],
                     "browser": self.config.get("browser", ""),
+                    "generation_method": self.config.get("generation_method", "greedy"),
+                    "beam_size": self.config.get("beam_size", 5),
+                    "top_k": self.config.get("top_k", 50),
+                    "top_p": self.config.get("top_p", 0.9),
                 },
                 f,
             )
@@ -131,7 +140,39 @@ class JobApplicationAutofill:
         return re.findall(pattern, html, re.IGNORECASE)
 
     def query_model(self, prompt, element=None):
-        return self.model_interface.generate(prompt)
+        """
+        Query the model with enhanced generation parameters including field information.
+        """
+        # Get the label if an element is provided
+        label = self.get_field_label(element) if element else None
+
+        # Determine if the field is a question
+        is_question = False
+        if label:
+            is_question = label.strip().strip("*").strip().endswith("?")
+
+        # Prepare field information
+        field_info = {}
+        if element:
+            field_info = {
+                "type": element.tag_name,
+                "label": label,
+                "id": element.get_attribute("id"),
+                "name": element.get_attribute("name"),
+            }
+
+        generation_params = {
+            "method": self.config.get("generation_method", "greedy"),
+            "beam_size": self.config.get("beam_size", 5),
+            "top_k": self.config.get("top_k", 50),
+            "top_p": self.config.get("top_p", 0.9),
+            "is_question": is_question,
+            "field_info": field_info,
+        }
+
+        return self.model_interface.generate(
+            prompt, generation_params=generation_params
+        )
 
     def fill_all_fields(self):
         self.switch_to_latest_tab()
@@ -406,6 +447,58 @@ class JobApplicationAutofill:
     def next_answer(self):
         self.change_answer("next")
 
+    def set_generation_method(self):
+        print("\nChoose generation method:")
+        print("1. Greedy (default)")
+        print("2. Beam Search")
+        print("3. Top-K Sampling")
+        print("4. Top-P (Nucleus) Sampling")
+        print("5. Custom")
+
+        while True:
+            choice = input("Enter choice (1-5): ")
+            match choice:
+                case "1":
+                    self.config["generation_method"] = "greedy"
+                    break
+                case "2":
+                    self.config["generation_method"] = "beam"
+                    beam_size = input("Enter number of beams (default 5): ").strip()
+                    self.config["beam_size"] = (
+                        int(beam_size) if beam_size.isdigit() else 5
+                    )
+                    break
+                case "3":
+                    self.config["generation_method"] = "top_k"
+                    k_value = input("Enter K value (default 50): ").strip()
+                    self.config["top_k"] = int(k_value) if k_value.isdigit() else 50
+                    break
+                case "4":
+                    self.config["generation_method"] = "top_p"
+                    p_value = input(
+                        "Enter P value between 0 and 1 (default 0.9): "
+                    ).strip()
+                    try:
+                        p = float(p_value)
+                        if 0 < p <= 1:
+                            self.config["top_p"] = p
+                        else:
+                            self.config["top_p"] = 0.9
+                    except ValueError:
+                        self.config["top_p"] = 0.9
+                    break
+                case "5":
+                    self.config["generation_method"] = "custom"
+                    print(
+                        "Custom generation parameters can be configured in model_interface.py"
+                    )
+                    break
+                case _:
+                    print("Invalid choice. Please enter a number between 1 and 5.")
+                    continue
+
+            self.save_config()
+
     def set_model(self):
         print("\nChoose model type:")
         print("1. Ollama")
@@ -466,6 +559,7 @@ class JobApplicationAutofill:
         print("p: Use previous answer for the current visible field")
         print("x: Use next answer or generate a new one for the current visible field")
         print("m: Change model settings")
+        print("g: Change generation method")  # Add new command
         print("q: Quit the program")
         print("h: Show this help message")
 
@@ -489,6 +583,8 @@ class JobApplicationAutofill:
                     self.next_answer()
                 elif command == "m":
                     self.set_model()
+                elif command == "g":  # Add new command handler
+                    self.set_generation_method()
                 elif command == "h":
                     self.print_commands()
                 elif command == "q":
